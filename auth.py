@@ -1,15 +1,14 @@
 import re
-import sqlite3
 from datetime import datetime, timedelta
-MAX_INTENTOS = 3
-MINUTOS_BLOQUEO = 5
-
-
 from getpass import getpass
 
 import bcrypt
+import psycopg
 
 from database import conectar, crear_tabla
+
+MAX_INTENTOS = 3
+MINUTOS_BLOQUEO = 5
 
 
 def validar_contrasena(contrasena):
@@ -39,10 +38,10 @@ def registrar_usuario(nombre_usuario, contrasena):
     try:
         with conectar() as conexion:
             conexion.execute(
-                "INSERT INTO usuarios (nombre_usuario, hash_contrasena) VALUES (?, ?)",
+                "INSERT INTO usuarios (nombre_usuario, hash_contrasena) VALUES (%s, %s)",
                 (nombre_usuario, hash_contrasena.decode("utf-8")),
             )
-    except sqlite3.IntegrityError:
+    except psycopg.errors.UniqueViolation:
         return False, "Ese nombre de usuario ya existe."
 
     return True, "Usuario registrado correctamente."
@@ -55,7 +54,7 @@ def iniciar_sesion(nombre_usuario, contrasena):
     with conectar() as conexion:
         fila = conexion.execute(
             "SELECT hash_contrasena, intentos_fallidos, bloqueado_hasta "
-            "FROM usuarios WHERE nombre_usuario = ?",
+            "FROM usuarios WHERE nombre_usuario = %s",
             (nombre_usuario,),
         ).fetchone()
 
@@ -64,16 +63,14 @@ def iniciar_sesion(nombre_usuario, contrasena):
 
         hash_guardado, intentos, bloqueado_hasta = fila
 
-        if bloqueado_hasta:
-            fin_bloqueo = datetime.fromisoformat(bloqueado_hasta)
-            if ahora < fin_bloqueo:
-                minutos = int((fin_bloqueo - ahora).total_seconds() // 60) + 1
-                return False, f"Cuenta bloqueada. Intenta de nuevo en {minutos} minuto(s)."
+        if bloqueado_hasta and ahora < bloqueado_hasta:
+            minutos = int((bloqueado_hasta - ahora).total_seconds() // 60) + 1
+            return False, f"Cuenta bloqueada. Intenta de nuevo en {minutos} minuto(s)."
 
         if bcrypt.checkpw(contrasena.encode("utf-8"), hash_guardado.encode("utf-8")):
             conexion.execute(
                 "UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = NULL "
-                "WHERE nombre_usuario = ?",
+                "WHERE nombre_usuario = %s",
                 (nombre_usuario,),
             )
             return True, "Inicio de sesión exitoso."
@@ -81,21 +78,20 @@ def iniciar_sesion(nombre_usuario, contrasena):
         intentos += 1
 
         if intentos >= MAX_INTENTOS:
-            nuevo_bloqueo = (ahora + timedelta(minutes=MINUTOS_BLOQUEO)).isoformat()
+            nuevo_bloqueo = ahora + timedelta(minutes=MINUTOS_BLOQUEO)
             conexion.execute(
-                "UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = ? "
-                "WHERE nombre_usuario = ?",
+                "UPDATE usuarios SET intentos_fallidos = 0, bloqueado_hasta = %s "
+                "WHERE nombre_usuario = %s",
                 (nuevo_bloqueo, nombre_usuario),
             )
             return False, f"Demasiados intentos. Cuenta bloqueada por {MINUTOS_BLOQUEO} minutos."
 
         conexion.execute(
-            "UPDATE usuarios SET intentos_fallidos = ? WHERE nombre_usuario = ?",
+            "UPDATE usuarios SET intentos_fallidos = %s WHERE nombre_usuario = %s",
             (intentos, nombre_usuario),
         )
         return False, "Usuario o contraseña incorrectos."
 
-        
 
 if __name__ == "__main__":
     crear_tabla()
